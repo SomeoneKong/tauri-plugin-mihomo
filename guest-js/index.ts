@@ -418,12 +418,35 @@ function normalizeWebSocketMessage(message: ChannelMessage): Message {
   return { type: "Text", data: JSON.stringify(message) };
 }
 
+// The last message that arrived before the first listener, such as the error of a
+// connection that ended while the consumer was still setting up.
+const messagesBeforeListeners = new WeakMap<
+  Set<(arg: Message) => void>,
+  Message
+>();
+
+function flushMessageBeforeListeners(
+  listeners: Set<(arg: Message) => void>,
+): void {
+  const pending = messagesBeforeListeners.get(listeners);
+  if (!pending) return;
+  messagesBeforeListeners.delete(listeners);
+  listeners.forEach((listener) => {
+    listener(pending);
+  });
+}
+
 function dispatchWebSocketMessage(
   listeners: Set<(arg: Message) => void>,
   message: ChannelMessage,
 ): void {
-  if (listeners.size === 0) return;
   const normalizedMessage = normalizeWebSocketMessage(message);
+  if (listeners.size === 0) {
+    messagesBeforeListeners.set(listeners, normalizedMessage);
+    return;
+  }
+  // a message kept for the first listener goes out before this newer one
+  flushMessageBeforeListeners(listeners);
   listeners.forEach((listener) => {
     listener(normalizedMessage);
   });
@@ -533,6 +556,13 @@ export class MihomoWebSocket {
    */
   addListener(cb: (arg: Message) => void): () => void {
     this.listeners.add(cb);
+    if (messagesBeforeListeners.has(this.listeners)) {
+      // after the caller has finished taking this socket over, unless a newer
+      // message delivers it first
+      setTimeout(() => {
+        if (!this.closed) flushMessageBeforeListeners(this.listeners);
+      }, 0);
+    }
     return () => {
       this.listeners.delete(cb);
     };
@@ -547,6 +577,7 @@ export class MihomoWebSocket {
 
     // 立即断开 JS 强引用，不等待 IPC
     this.listeners.clear();
+    messagesBeforeListeners.delete(this.listeners);
     MihomoWebSocket.instances.delete(this);
 
     try {

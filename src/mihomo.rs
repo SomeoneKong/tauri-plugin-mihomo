@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -52,12 +52,17 @@ fn text_channel_body(text: &str) -> InvokeResponseBody {
     }
 }
 
+// Consumers reconnect on error text, which a connection mihomo closed needs as well.
+fn closed_channel_body() -> InvokeResponseBody {
+    text_channel_body(&Error::Websocket("connection closed".into()).to_string())
+}
+
 fn websocket_message_to_channel_body(
     message: std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
 ) -> (Option<InvokeResponseBody>, bool) {
     match message {
         Ok(Message::Text(text)) => (Some(text_channel_body(&text)), false),
-        Ok(Message::Close(_)) => (None, true),
+        Ok(Message::Close(_)) => (Some(closed_channel_body()), true),
         Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => (None, false),
         Err(err) => {
             log::warn!("websocket error: {err}");
@@ -161,6 +166,7 @@ fn spawn_ws_reader<R, F>(
                         }
                         None => {
                             log::debug!("connection [{id}] stream ended");
+                            let _ = on_message(closed_channel_body());
                             manager.0.remove(&id);
                             untrack_ws_reader(reader_key);
                             break;
@@ -320,6 +326,15 @@ impl MihomoContext {
 pub struct Mihomo {
     ctx: ArcSwap<MihomoContext>,
     pub connection_manager: ConnectionManager,
+    ws_registry: Mutex<WsRegistry>,
+}
+
+/// Serializes registering a websocket connection with clearing them all, so a clear
+/// can't miss a connection registered meanwhile.
+#[derive(Default)]
+struct WsRegistry {
+    /// Bumped by every clear: a connection dialed before it is not registered.
+    generation: u64,
 }
 
 impl Mihomo {
@@ -327,7 +342,12 @@ impl Mihomo {
         Self {
             ctx: ArcSwap::from_pointee(ctx),
             connection_manager: ConnectionManager::default(),
+            ws_registry: Mutex::default(),
         }
+    }
+
+    fn ws_registry(&self) -> MutexGuard<'_, WsRegistry> {
+        self.ws_registry.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn load_ctx(&self) -> Guard<Arc<MihomoContext>> {
@@ -406,41 +426,47 @@ impl Mihomo {
         let url = ctx.get_websocket_url(suffix_url, queries)?;
         log::debug!("connecting to websocket, id: {id}");
         let manager = self.connection_manager.clone();
+        let generation = self.ws_registry().generation;
+        let connect_timeout = ctx.request_timeout;
 
-        match ctx.protocol {
-            Protocol::Http => {
-                log::debug!("starting connect to websocket by using http");
-                let request = url.into_client_request()?;
-                let (ws_stream, _) = connect_async(request).await?;
-                let (writer, reader) = WsStream::from(ws_stream).split();
-                let (cancel_reader, cancel_reader_rx) = tokio::sync::oneshot::channel();
-                let reader_key = ws_reader_key(&manager, id);
+        let dial = async move {
+            match ctx.protocol {
+                Protocol::Http => {
+                    log::debug!("starting connect to websocket by using http");
+                    let request = url.into_client_request()?;
+                    let (ws_stream, _) = connect_async(request).await?;
+                    Ok::<_, Error>(WsStream::from(ws_stream))
+                }
+                Protocol::LocalSocket => {
+                    let socket_path = ctx.socket_path()?;
+                    log::trace!("starting connect to websocket by using local socket: {socket_path}");
+                    let stream = crate::stream::connect_to_socket(socket_path).await?;
 
-                manager.0.insert(id, Arc::new(tokio::sync::Mutex::new(writer)));
-                track_ws_reader(reader_key, cancel_reader);
-
-                spawn_ws_reader(manager, id, reader, cancel_reader_rx, reader_key, on_message);
-
-                Ok(id)
+                    let request = url.into_client_request()?;
+                    let (ws_stream, _) = client_async(request, stream).await?;
+                    Ok(WsStream::from(ws_stream))
+                }
             }
-            Protocol::LocalSocket => {
-                let socket_path = ctx.socket_path()?;
-                log::trace!("starting connect to websocket by using local socket: {socket_path}");
-                let stream = crate::stream::connect_to_socket(socket_path).await?;
+        };
+        let ws_stream = tokio::time::timeout(connect_timeout, dial)
+            .await
+            .map_err(|_| Error::Websocket("timed out connecting".into()))??;
 
-                let request = url.into_client_request()?;
-                let (ws_stream, _) = client_async(request, stream).await?;
-                let (writer, reader) = WsStream::from(ws_stream).split();
-                let (cancel_reader, cancel_reader_rx) = tokio::sync::oneshot::channel();
-                let reader_key = ws_reader_key(&manager, id);
-
-                manager.0.insert(id, Arc::new(tokio::sync::Mutex::new(writer)));
-                track_ws_reader(reader_key, cancel_reader);
-
-                spawn_ws_reader(manager, id, reader, cancel_reader_rx, reader_key, on_message);
-                Ok(id)
+        let (writer, reader) = ws_stream.split();
+        let (cancel_reader, cancel_reader_rx) = tokio::sync::oneshot::channel();
+        let reader_key = ws_reader_key(&manager, id);
+        {
+            let registry = self.ws_registry();
+            if registry.generation != generation {
+                log::debug!("websocket connections were cleared while connecting, dropping {id}");
+                return Err(Error::Websocket("connections were cleared while connecting".into()));
             }
+            manager.0.insert(id, Arc::new(tokio::sync::Mutex::new(writer)));
+            track_ws_reader(reader_key, cancel_reader);
         }
+
+        spawn_ws_reader(manager, id, reader, cancel_reader_rx, reader_key, on_message);
+        Ok(id)
     }
 
     /// 取消 WebSocket 连接
@@ -460,7 +486,16 @@ impl Mihomo {
             }));
 
             log::debug!("send close message");
-            let _ = writer.lock().await.send(close_message).await;
+            let send_close = async {
+                let _ = writer.lock().await.send(close_message).await;
+            };
+            match force_timeout {
+                // a stuck connection can block taking the writer as well as sending
+                Some(timeout) => {
+                    let _ = tokio::time::timeout(Duration::from_millis(timeout), send_close).await;
+                }
+                None => send_close.await,
+            }
         }
 
         if let Some(timeout) = force_timeout {
@@ -492,6 +527,8 @@ impl Mihomo {
 
     pub fn clear_all_ws_connections(&self) -> Result<()> {
         log::debug!("start to clear all websocket connections");
+        let mut registry = self.ws_registry();
+        registry.generation += 1;
         let old_keys = self
             .connection_manager
             .0
@@ -1170,6 +1207,107 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn local_mihomo(port: u16, request_timeout: Duration) -> Mihomo {
+        Mihomo::new(MihomoContext::new(
+            Protocol::Http,
+            Some("127.0.0.1".into()),
+            Some(port),
+            None,
+            None,
+            request_timeout,
+            reqwest::Client::new(),
+        ))
+    }
+
+    async fn local_listener() -> std::io::Result<(tokio::net::TcpListener, u16)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        Ok((listener, port))
+    }
+
+    #[tokio::test]
+    async fn connection_closed_by_mihomo_is_reported_to_the_consumer() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await
+                && let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await
+            {
+                let _ = ws.close(None).await;
+            }
+        });
+
+        let mihomo = local_mihomo(port, Duration::from_secs(5));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = mihomo
+            .connect("/traffic", None, move |body| {
+                let _ = tx.send(channel_body_to_text_bytes(body));
+                true
+            })
+            .await?;
+
+        let message = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await?
+            .ok_or("the reader ended without a message")?;
+        let text: String = serde_json::from_slice(&message)?;
+        assert!(text.starts_with("Websocket error"), "{text}");
+        for _ in 0..50 {
+            if !mihomo.connection_manager.0.contains_key(&id) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Err("the closed connection is still registered".into())
+    }
+
+    #[tokio::test]
+    async fn connection_dialed_before_a_clear_is_not_registered() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (handshake_tx, handshake_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let _ = accepted_tx.send(());
+                let _ = handshake_rx.await;
+                if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    drop(ws);
+                }
+            }
+        });
+
+        let mihomo = Arc::new(local_mihomo(port, Duration::from_secs(5)));
+        let connecting = tokio::spawn({
+            let mihomo = Arc::clone(&mihomo);
+            async move { mihomo.connect("/traffic", None, |_| true).await }
+        });
+        accepted_rx.await?;
+        mihomo.clear_all_ws_connections()?;
+        let _ = handshake_tx.send(());
+
+        assert!(connecting.await?.is_err());
+        assert!(mihomo.connection_manager.0.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stuck_handshake_gives_up_after_the_request_timeout() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                drop(stream);
+            }
+        });
+
+        let mihomo = local_mihomo(port, Duration::from_millis(200));
+        let started = Instant::now();
+        assert!(mihomo.connect("/traffic", None, |_| true).await.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        Ok(())
+    }
 
     #[derive(serde::Serialize)]
     #[serde(tag = "type", content = "data")]
