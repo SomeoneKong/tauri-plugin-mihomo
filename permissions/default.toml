@@ -39,5 +39,6 @@ permissions = [
   "allow-ws-connections-count",
   "allow-ws-logs",
   "allow-ws-disconnect",
+  "allow-ws-ack",
   "allow-clear-all-ws-connections",
 ]

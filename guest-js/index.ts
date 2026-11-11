@@ -422,10 +422,15 @@ function dispatchWebSocketMessage(
   listeners: Set<(arg: Message) => void>,
   message: ChannelMessage,
 ): void {
+  if (listeners.size === 0) return;
   const normalizedMessage = normalizeWebSocketMessage(message);
   listeners.forEach((listener) => {
     listener(normalizedMessage);
   });
+}
+
+function acknowledgeWebSocketMessage(id: string): void {
+  invoke("plugin:mihomo|ws_ack", { id }).catch(() => {});
 }
 
 async function openWebSocketCommand(
@@ -433,15 +438,29 @@ async function openWebSocketCommand(
   args: Record<string, unknown> = {},
 ): Promise<MihomoWebSocket> {
   const listeners: Set<(arg: Message) => void> = new Set();
-  const onMessage = new Channel<ChannelMessage>();
-  onMessage.onmessage = (message: ChannelMessage): void => {
-    dispatchWebSocketMessage(listeners, message);
+  const onMessage = new Channel<ChannelMessage | ChannelMessage[]>();
+  let id: string | null = null;
+  let acknowledgementOwed = false;
+  onMessage.onmessage = (message): void => {
+    try {
+      // events arrive in batches, as an array
+      const messages = Array.isArray(message) ? message : [message];
+      messages.forEach((item) => dispatchWebSocketMessage(listeners, item));
+    } finally {
+      // the backend sends the next message once this one is acknowledged
+      if (id === null) {
+        acknowledgementOwed = true;
+      } else {
+        acknowledgeWebSocketMessage(id);
+      }
+    }
   };
 
-  const id = await invoke<string>(`plugin:mihomo|${command}`, {
+  id = await invoke<string>(`plugin:mihomo|${command}`, {
     ...args,
     onMessage,
   });
+  if (acknowledgementOwed) acknowledgeWebSocketMessage(id);
   return new MihomoWebSocket(id, listeners);
 }
 

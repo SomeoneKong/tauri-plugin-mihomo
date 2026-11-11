@@ -5,7 +5,12 @@ use tauri::{
     ipc::{Channel, InvokeResponseBody},
 };
 
-use crate::{Result, mihomo::Mihomo, models::*};
+use crate::{
+    Result,
+    flow::{self, ChannelFlow, FlowMode},
+    mihomo::Mihomo,
+    models::*,
+};
 
 #[command]
 pub(crate) fn update_controller(state: State<'_, Mihomo>, host: Option<&str>, port: Option<u16>) -> Result<()> {
@@ -218,9 +223,10 @@ pub(crate) async fn ws_traffic(
     state: State<'_, Mihomo>,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<WsConnectionId> {
-    state
-        .ws_traffic_checked(move |data| on_message.send(data).is_ok())
-        .await
+    let flow = ChannelFlow::new(FlowMode::Latest, move |data| on_message.send(data).is_ok());
+    let id = state.ws_traffic_checked(flow.forwarder()).await?;
+    flow.register(id);
+    Ok(id)
 }
 
 #[command]
@@ -228,7 +234,10 @@ pub(crate) async fn ws_memory(
     state: State<'_, Mihomo>,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<WsConnectionId> {
-    state.ws_memory_checked(move |data| on_message.send(data).is_ok()).await
+    let flow = ChannelFlow::new(FlowMode::Latest, move |data| on_message.send(data).is_ok());
+    let id = state.ws_memory_checked(flow.forwarder()).await?;
+    flow.register(id);
+    Ok(id)
 }
 
 #[command]
@@ -236,9 +245,10 @@ pub(crate) async fn ws_connections(
     state: State<'_, Mihomo>,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<WsConnectionId> {
-    state
-        .ws_connections_checked(move |data| on_message.send(data).is_ok())
-        .await
+    let flow = ChannelFlow::new(FlowMode::Latest, move |data| on_message.send(data).is_ok());
+    let id = state.ws_connections_checked(flow.forwarder()).await?;
+    flow.register(id);
+    Ok(id)
 }
 
 #[command]
@@ -246,9 +256,10 @@ pub(crate) async fn ws_connections_count(
     state: State<'_, Mihomo>,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<WsConnectionId> {
-    state
-        .ws_connections_count_checked(move |data| on_message.send(data).is_ok())
-        .await
+    let flow = ChannelFlow::new(FlowMode::Latest, move |data| on_message.send(data).is_ok());
+    let id = state.ws_connections_count_checked(flow.forwarder()).await?;
+    flow.register(id);
+    Ok(id)
 }
 
 #[command]
@@ -257,9 +268,15 @@ pub(crate) async fn ws_logs(
     level: LogLevel,
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<WsConnectionId> {
-    state
-        .ws_logs_checked(level, move |data| on_message.send(data).is_ok())
-        .await
+    let flow = ChannelFlow::new(FlowMode::Batch, move |data| on_message.send(data).is_ok());
+    let id = state.ws_logs_checked(level, flow.forwarder()).await?;
+    flow.register(id);
+    Ok(id)
+}
+
+#[command]
+pub(crate) fn ws_ack(id: WsConnectionId) {
+    flow::ack(id);
 }
 
 #[command]

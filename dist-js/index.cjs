@@ -319,21 +319,43 @@ function normalizeWebSocketMessage(message) {
     return { type: "Text", data: JSON.stringify(message) };
 }
 function dispatchWebSocketMessage(listeners, message) {
+    if (listeners.size === 0)
+        return;
     const normalizedMessage = normalizeWebSocketMessage(message);
     listeners.forEach((listener) => {
         listener(normalizedMessage);
     });
 }
+function acknowledgeWebSocketMessage(id) {
+    core.invoke("plugin:mihomo|ws_ack", { id }).catch(() => { });
+}
 async function openWebSocketCommand(command, args = {}) {
     const listeners = new Set();
     const onMessage = new core.Channel();
+    let id = null;
+    let acknowledgementOwed = false;
     onMessage.onmessage = (message) => {
-        dispatchWebSocketMessage(listeners, message);
+        try {
+            // events arrive in batches, as an array
+            const messages = Array.isArray(message) ? message : [message];
+            messages.forEach((item) => dispatchWebSocketMessage(listeners, item));
+        }
+        finally {
+            // the backend sends the next message once this one is acknowledged
+            if (id === null) {
+                acknowledgementOwed = true;
+            }
+            else {
+                acknowledgeWebSocketMessage(id);
+            }
+        }
     };
-    const id = await core.invoke(`plugin:mihomo|${command}`, {
+    id = await core.invoke(`plugin:mihomo|${command}`, {
         ...args,
         onMessage,
     });
+    if (acknowledgementOwed)
+        acknowledgeWebSocketMessage(id);
     return new MihomoWebSocket(id, listeners);
 }
 class MihomoWebSocket {

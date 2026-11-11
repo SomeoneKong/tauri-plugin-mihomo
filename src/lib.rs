@@ -8,6 +8,7 @@ use tauri::{
 
 mod commands;
 mod error;
+mod flow;
 mod mihomo;
 pub mod models;
 mod stream;
@@ -149,6 +150,7 @@ impl Builder {
                 commands::ws_connections_count,
                 commands::ws_logs,
                 commands::ws_disconnect,
+                commands::ws_ack,
                 commands::clear_all_ws_connections,
             ])
             .setup(move |app, _api| {
