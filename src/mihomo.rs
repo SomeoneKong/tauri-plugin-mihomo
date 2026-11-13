@@ -23,11 +23,12 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, PROVIDER_UPDATE_TIMEOUT, Result,
+    DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, OUTDATED_CONNECTIONS_TIMEOUT, PROVIDER_UPDATE_TIMEOUT,
+    Result,
     models::{
         BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, MihomoVersion,
-        Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage, RuleProviders, Rules,
-        WsConnectionId,
+        OutdatedConnections, Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage,
+        RuleProviders, Rules, WsConnectionId,
     },
     ret_failed_resp,
     stream::WsStream,
@@ -725,6 +726,29 @@ impl Mihomo {
             ret_failed_resp!("{}", err_msg);
         }
         Ok(response.json::<Connections>().await?)
+    }
+
+    /// 关闭当前配置不会同样承载的连接（切换配置之后），返回 mihomo 的判定计数。
+    /// 不认识该参数的 mihomo 会关闭全部连接并且不返回计数，此时为 `None`。
+    pub async fn close_outdated_connections(&self) -> Result<Option<OutdatedConnections>> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::DELETE, "/connections")?
+            .query(&[("outdated", "true")])
+            .timeout(OUTDATED_CONNECTIONS_TIMEOUT)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let err_msg = response.json::<ErrorResponse>().await.map_or_else(
+                |e| format!("close outdated connections failed, {}", e),
+                |err_res| err_res.message,
+            );
+            ret_failed_resp!("{}", err_msg);
+        }
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Ok(Some(response.json::<OutdatedConnections>().await?))
     }
 
     /// 关闭全部连接

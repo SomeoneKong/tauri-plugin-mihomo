@@ -1160,3 +1160,13 @@ pub type WsConnectionId = Uuid;
 
 #[derive(Default, Clone)]
 pub struct ConnectionManager(pub Arc<ClashMap<WsConnectionId, Arc<tokio::sync::Mutex<WsWriteKind>>>>);
+
+/// What mihomo found closing the connections the config in use would not carry the same way.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OutdatedConnections {
+    /// Connections being closed.
+    pub closed: u64,
+    pub kept: u64,
+    /// Connections kept as they were not judged in time, or as a provider updated meanwhile.
+    pub undetermined: u64,
+}

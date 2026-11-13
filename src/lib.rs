@@ -32,6 +32,8 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DOWNLOAD_FILE_TIMEOUT: Duration = Duration::from_secs(90);
 // Must outlast mihomo's 20s provider fetch, or its error response is lost to a client timeout.
 const PROVIDER_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
+// Must outlast the 10s mihomo judges the connections for.
+const OUTDATED_CONNECTIONS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
 pub struct Builder {
