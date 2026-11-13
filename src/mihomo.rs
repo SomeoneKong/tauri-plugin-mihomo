@@ -26,7 +26,8 @@ use crate::{
     DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, PROVIDER_UPDATE_TIMEOUT, Result,
     models::{
         BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, MihomoVersion,
-        Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, RuleProviders, Rules, WsConnectionId,
+        Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage, RuleProviders, Rules,
+        WsConnectionId,
     },
     ret_failed_resp,
     stream::WsStream,
@@ -655,6 +656,24 @@ impl Mihomo {
             ret_failed_resp!("{}", err_msg);
         }
         Ok(response.json::<MihomoVersion>().await?)
+    }
+
+    /// 获取按代理的流量用量，`since`、`until` 为 UTC 小时（自 Unix 纪元起），两端都包含
+    pub async fn get_proxy_usage(&self, since: i64, until: i64) -> Result<ProxyUsage> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/usage/proxies")?
+            .query(&[("since", since.to_string()), ("until", until.to_string())])
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let err_msg = response
+                .json::<ErrorResponse>()
+                .await
+                .map_or_else(|e| format!("get proxy usage failed, {}", e), |err_res| err_res.message);
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(response.json::<ProxyUsage>().await?)
     }
 
     /// 清理 FakeIP 缓存

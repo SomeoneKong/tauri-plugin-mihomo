@@ -1115,6 +1115,47 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+/// Per-proxy traffic of a range of UTC hours (hours since the Unix epoch), from `GET /usage/proxies`.
+///
+/// Within one `instance`, the counts of an hour only grow; hours from `retained_since` to
+/// `settled` are final. Hours before `retained_since` are no longer kept by the core.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyUsage {
+    pub instance: String,
+    pub started_at: String,
+    pub hour: i64,
+    pub settled: i64,
+    pub retained_since: i64,
+    #[serde(default)]
+    pub overflow: bool,
+    #[serde(default)]
+    pub entries: Vec<ProxyUsageEntry>,
+}
+
+/// The traffic of one proxy, identified as the core saw it when the connections were made.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyUsageEntry {
+    #[serde(default)]
+    pub provider: String,
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub proxy_type: String,
+    #[serde(default)]
+    pub addr: String,
+    #[serde(default)]
+    pub incomplete: bool,
+    #[serde(default)]
+    pub buckets: Vec<ProxyUsageBucket>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProxyUsageBucket {
+    pub hour: i64,
+    pub up: u64,
+    pub down: u64,
+}
+
 pub type WsConnectionId = Uuid;
 
 #[derive(Default, Clone)]
