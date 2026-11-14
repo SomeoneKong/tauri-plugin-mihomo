@@ -659,12 +659,17 @@ impl Mihomo {
         Ok(response.json::<MihomoVersion>().await?)
     }
 
-    /// 获取按代理的流量用量，`since`、`until` 为 UTC 小时（自 Unix 纪元起），两端都包含
+    /// 获取按代理的流量用量，`since`、`until` 为 UTC 小时（自 Unix 纪元起），两端都包含；
+    /// 支持的内核按类别与路径拆分条目
     pub async fn get_proxy_usage(&self, since: i64, until: i64) -> Result<ProxyUsage> {
         let response = self
             .load_ctx()
             .build_request(Method::GET, "/usage/proxies")?
-            .query(&[("since", since.to_string()), ("until", until.to_string())])
+            .query(&[
+                ("since", since.to_string()),
+                ("until", until.to_string()),
+                ("routes", "true".to_string()),
+            ])
             .send()
             .await?;
         if !response.status().is_success() {

@@ -1129,11 +1129,15 @@ pub struct ProxyUsage {
     pub retained_since: i64,
     #[serde(default)]
     pub overflow: bool,
+    /// The entries are split by kind and route; a core that cannot split them leaves this unset.
+    #[serde(default)]
+    pub routes: bool,
     #[serde(default)]
     pub entries: Vec<ProxyUsageEntry>,
 }
 
-/// The traffic of one proxy, identified as the core saw it when the connections were made.
+/// The traffic of one proxy, identified as the core saw it when the connections were made,
+/// or, when the entries are split, of one of its kinds and routes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProxyUsageEntry {
     #[serde(default)]
@@ -1146,7 +1150,26 @@ pub struct ProxyUsageEntry {
     #[serde(default)]
     pub incomplete: bool,
     #[serde(default)]
+    pub kind: Option<ProxyUsageKind>,
+    /// The groups from the proxy out to the one a rule chose.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// Layer by layer, the dialer proxies the proxy reached its server through, each as the
+    /// node and then its groups; an unknown node is empty.
+    #[serde(default)]
+    pub dialers: Vec<Vec<String>>,
+    #[serde(default)]
     pub buckets: Vec<ProxyUsageBucket>,
+}
+
+/// What the traffic of a proxy was for.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyUsageKind {
+    /// Connections of its own, along a route.
+    Exit,
+    /// Connections it made to carry another proxy's.
+    Relay,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
