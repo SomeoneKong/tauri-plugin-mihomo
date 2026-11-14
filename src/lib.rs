@@ -34,6 +34,10 @@ const DOWNLOAD_FILE_TIMEOUT: Duration = Duration::from_secs(90);
 const PROVIDER_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 // Must outlast the 10s mihomo judges the connections for.
 const OUTDATED_CONNECTIONS_TIMEOUT: Duration = Duration::from_secs(15);
+// Must outlast the 90s mihomo waits for a login, and the 30s for a logout, or the result
+// is lost to a client timeout.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(105);
+const LOGOUT_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug)]
 pub struct Builder {

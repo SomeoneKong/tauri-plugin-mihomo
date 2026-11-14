@@ -1179,6 +1179,101 @@ pub struct ProxyUsageBucket {
     pub down: u64,
 }
 
+/// The proxies of the running config that log in as a device of an account, from `GET /logins`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Logins {
+    #[serde(default)]
+    pub logins: Vec<LoginEntry>,
+    /// For each state-dir asked about, the proxies that share the device identity it would have.
+    #[serde(default)]
+    pub matches: Vec<StateDirMatch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginEntry {
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub proxy_type: String,
+    /// Tells this proxy apart from another one of the same name; logins and logouts carry it.
+    pub instance: String,
+    #[serde(default)]
+    pub control_url: String,
+    #[serde(default)]
+    pub state_dir: String,
+    #[serde(default)]
+    pub ephemeral: bool,
+    /// The config has an auth key, which logs the proxy in again whenever it starts logged out.
+    #[serde(default)]
+    pub config_auth_key: bool,
+    pub state: LoginState,
+    /// The device has an identity, whatever the state, as one whose key expired.
+    #[serde(default)]
+    pub identity: bool,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub tailnet: String,
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub key_expiry: Option<String>,
+    #[serde(default)]
+    pub auth_url: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginState {
+    NotStarted,
+    Starting,
+    NeedsLogin,
+    /// Waits for the admin of the control server to approve the device.
+    NeedsApproval,
+    Running,
+    Stopped,
+    Failed,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StateDirMatch {
+    pub state_dir: String,
+    #[serde(default)]
+    pub resolved: String,
+    /// The core does not allow the dir.
+    #[serde(default)]
+    pub invalid: bool,
+    #[serde(default)]
+    pub nodes: Vec<LoginNodeRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LoginNodeRef {
+    pub name: String,
+    pub instance: String,
+}
+
+/// Why the core did not log a proxy in or out.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LoginFailure {
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginOutcome {
+    Done(Box<LoginEntry>),
+    Failed(LoginFailure),
+}
+
 pub type WsConnectionId = Uuid;
 
 #[derive(Default, Clone)]

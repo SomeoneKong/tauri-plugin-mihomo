@@ -14,7 +14,7 @@ use http::{
 };
 use log::log_enabled;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Method, RequestBuilder};
+use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::json;
 use tauri::ipc::InvokeResponseBody;
 use tokio_tungstenite::{
@@ -23,12 +23,12 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, OUTDATED_CONNECTIONS_TIMEOUT, PROVIDER_UPDATE_TIMEOUT,
-    Result,
+    DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, LOGIN_TIMEOUT, LOGOUT_TIMEOUT, OUTDATED_CONNECTIONS_TIMEOUT,
+    PROVIDER_UPDATE_TIMEOUT, Result,
     models::{
-        BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, MihomoVersion,
-        OutdatedConnections, Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage,
-        RuleProviders, Rules, WsConnectionId,
+        BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, LoginFailure,
+        LoginOutcome, Logins, MihomoVersion, OutdatedConnections, Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider,
+        ProxyProviders, ProxyUsage, RuleProviders, Rules, WsConnectionId,
     },
     ret_failed_resp,
     stream::WsStream,
@@ -682,6 +682,73 @@ impl Mihomo {
         Ok(response.json::<ProxyUsage>().await?)
     }
 
+    /// 获取当前配置中需要登录的节点，不会启动节点；`state_dirs` 为其它配置的节点写的 state-dir，
+    /// 内核按自己的工作目录解析，返回与之共用设备身份的节点。内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_logins(&self, state_dirs: &[String]) -> Result<Option<Logins>> {
+        let query: Vec<(&str, &str)> = state_dirs.iter().map(|dir| ("stateDir", dir.as_str())).collect();
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/logins")?
+            .query(&query)
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response
+                .json::<ErrorResponse>()
+                .await
+                .map_or_else(|e| format!("get logins failed, {}", e), |err_res| err_res.message);
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<Logins>().await?))
+    }
+
+    /// 用授权码登录节点；`auth_key` 为空时获取登录链接。`instance` 为列表中该节点的实例标识
+    pub async fn login_node(&self, name: &str, instance: &str, auth_key: Option<&str>) -> Result<LoginOutcome> {
+        let mut body = json!({ "instance": instance });
+        if let Some(key) = auth_key {
+            body["authKey"] = key.into();
+        }
+        let response = self
+            .load_ctx()
+            .build_request(Method::POST, &login_path(name))?
+            .json(&body)
+            .timeout(LOGIN_TIMEOUT)
+            .send()
+            .await?;
+        Self::login_outcome(response, "login").await
+    }
+
+    /// 退出节点的登录，`instance` 为列表中该节点的实例标识
+    pub async fn logout_node(&self, name: &str, instance: &str) -> Result<LoginOutcome> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::DELETE, &login_path(name))?
+            .query(&[("instance", instance)])
+            .timeout(LOGOUT_TIMEOUT)
+            .send()
+            .await?;
+        Self::login_outcome(response, "logout").await
+    }
+
+    /// A failure the core tells with a code is an outcome; anything else is an error.
+    async fn login_outcome(response: Response, action: &str) -> Result<LoginOutcome> {
+        let status = response.status();
+        let text = response.text().await?;
+        if status.is_success() {
+            return Ok(LoginOutcome::Done(Box::new(serde_json::from_str(&text)?)));
+        }
+        if let Ok(failure) = serde_json::from_str::<LoginFailure>(&text)
+            && !failure.code.is_empty()
+        {
+            return Ok(LoginOutcome::Failed(failure));
+        }
+        let message = serde_json::from_str::<ErrorResponse>(&text).map_or(text, |err_res| err_res.message);
+        ret_failed_resp!("{} failed, {}", action, message);
+    }
+
     /// 清理 FakeIP 缓存
     pub async fn flush_fakeip(&self) -> Result<()> {
         let response = self
@@ -1250,11 +1317,23 @@ impl Mihomo {
     }
 }
 
+/// The path of a node to log in. A URL drops a segment of only dots, even escaped, so their
+/// dots are escaped twice, which mihomo unescapes twice for a node name.
+fn login_path(name: &str) -> String {
+    let segment = match name {
+        "." => "%252E".to_string(),
+        ".." => "%252E%252E".to_string(),
+        _ => utf8_percent_encode(name, NON_ALPHANUMERIC).to_string(),
+    };
+    format!("/logins/{segment}")
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::models::LoginState;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -1354,6 +1433,177 @@ mod tests {
         let started = Instant::now();
         assert!(mihomo.connect("/traffic", None, |_| true).await.is_err());
         assert!(started.elapsed() < Duration::from_secs(2));
+        Ok(())
+    }
+
+    /// Answers one HTTP request with `status` and `body`, and returns the request it got.
+    fn answer_once(
+        listener: tokio::net::TcpListener,
+        status: &'static str,
+        body: &'static str,
+    ) -> tokio::task::JoinHandle<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return String::new();
+            };
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                    let len = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            String::from_utf8_lossy(&request).into_owned()
+        })
+    }
+
+    const LOGIN_ENTRY: &str = r#"{"name":"ts","type":"Tailscale","instance":"i-1","controlUrl":"http://hs.example","stateDir":"/state","configAuthKey":true,"state":"needs_login","identity":true,"addresses":["100.64.0.1"],"keyExpiry":"2027-01-01T00:00:00Z"}"#;
+
+    #[tokio::test]
+    async fn get_logins_asks_about_state_dirs_and_reads_the_matches() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let body = r#"{"logins":[{"name":"ts","type":"Tailscale","instance":"i-1","controlUrl":"http://hs.example","stateDir":"/state","configAuthKey":true,"state":"needs_login","identity":true,"addresses":["100.64.0.1"],"keyExpiry":"2027-01-01T00:00:00Z"}],"matches":[{"stateDir":"a","resolved":"/home/a","nodes":[{"name":"ts","instance":"i-1"}]},{"stateDir":"","invalid":true}]}"#;
+        let request = answer_once(listener, "200 OK", body);
+
+        let logins = local_mihomo(port, Duration::from_secs(5))
+            .get_logins(&["a".into(), String::new()])
+            .await?
+            .ok_or("no logins")?;
+        assert!(request.await?.starts_with("GET /logins?stateDir=a&stateDir= "));
+        let entry = &logins.logins[0];
+        assert_eq!(entry.state, LoginState::NeedsLogin);
+        assert!(entry.identity && entry.config_auth_key);
+        assert_eq!(entry.control_url, "http://hs.example");
+        assert_eq!(entry.addresses, vec!["100.64.0.1"]);
+        assert_eq!(logins.matches[0].nodes[0].instance, "i-1");
+        assert!(logins.matches[1].invalid);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_logins_of_an_old_core_is_none() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let _request = answer_once(listener, "404 Not Found", r#"{"message":"Resource not found"}"#);
+        assert!(
+            local_mihomo(port, Duration::from_secs(5))
+                .get_logins(&[])
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_sends_the_instance_and_the_key() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let request = answer_once(listener, "200 OK", LOGIN_ENTRY);
+        let outcome = local_mihomo(port, Duration::from_secs(5))
+            .login_node("a/b", "i-1", Some("tskey-auth-1"))
+            .await?;
+        let request = request.await?;
+        assert!(request.starts_with("POST /logins/a%2Fb "));
+        assert!(request.contains(r#""instance":"i-1""#));
+        assert!(request.contains(r#""authKey":"tskey-auth-1""#));
+        assert!(matches!(outcome, LoginOutcome::Done(entry) if entry.name == "ts"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_for_a_link_sends_no_key() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let request = answer_once(listener, "200 OK", LOGIN_ENTRY);
+        local_mihomo(port, Duration::from_secs(5))
+            .login_node("ts", "i-1", None)
+            .await?;
+        assert!(!request.await?.contains("authKey"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_login_failure_with_a_code_is_an_outcome() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let _request = answer_once(
+            listener,
+            "409 Conflict",
+            r#"{"code":"logged_in","message":"log it out first"}"#,
+        );
+        let outcome = local_mihomo(port, Duration::from_secs(5))
+            .login_node("ts", "i-1", Some("tskey-auth-1"))
+            .await?;
+        assert_eq!(
+            outcome,
+            LoginOutcome::Failed(LoginFailure {
+                code: "logged_in".into(),
+                message: "log it out first".into()
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failure_without_a_code_is_an_error() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let _request = answer_once(listener, "404 Not Found", r#"{"message":"Resource not found"}"#);
+        assert!(
+            local_mihomo(port, Duration::from_secs(5))
+                .logout_node("ts", "i-1")
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_keeps_a_node_name_of_only_dots() -> TestResult {
+        for (name, path) in [(".", "/logins/%252E "), ("..", "/logins/%252E%252E ")] {
+            let (listener, port) = local_listener().await?;
+            let request = answer_once(listener, "200 OK", LOGIN_ENTRY);
+            local_mihomo(port, Duration::from_secs(5))
+                .logout_node(name, "i-1")
+                .await?;
+            let request = request.await?;
+            assert!(
+                request.starts_with(&format!("DELETE {}", path.replace(' ', "?instance=i-1 "))),
+                "{request}"
+            );
+            let (listener, port) = local_listener().await?;
+            let request = answer_once(listener, "200 OK", LOGIN_ENTRY);
+            local_mihomo(port, Duration::from_secs(5))
+                .login_node(name, "i-1", None)
+                .await?;
+            assert!(request.await?.starts_with(&format!("POST {path}")));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logout_sends_the_instance() -> TestResult {
+        let (listener, port) = local_listener().await?;
+        let request = answer_once(listener, "200 OK", LOGIN_ENTRY);
+        let outcome = local_mihomo(port, Duration::from_secs(5))
+            .logout_node("ts", "i-1")
+            .await?;
+        assert!(request.await?.starts_with("DELETE /logins/ts?instance=i-1 "));
+        assert!(matches!(outcome, LoginOutcome::Done(_)));
         Ok(())
     }
 
