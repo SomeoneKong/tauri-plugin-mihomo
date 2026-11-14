@@ -1179,6 +1179,42 @@ pub struct ProxyUsageBucket {
     pub down: u64,
 }
 
+/// Decision records of the probe strategy, from `GET /probes/events`.
+///
+/// Sequence numbers count from 1 within one `instance`; events before `oldest` were dropped
+/// by the core.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeEvents {
+    pub schema: u32,
+    pub instance: String,
+    pub started_at: String,
+    pub oldest: u64,
+    pub latest: u64,
+    /// Each event as the core wrote it; every event has `seq`, `time` and `kind`.
+    #[serde(default)]
+    pub events: Vec<Value>,
+}
+
+/// Contexts the decision records refer to, from `GET /probes/contexts`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ProbeContexts {
+    pub schema: u32,
+    pub instance: String,
+    /// Each context as the core wrote it, with its `kind` and `version`.
+    #[serde(default)]
+    pub contexts: Vec<Value>,
+    /// The contexts asked for that the core no longer keeps.
+    #[serde(default)]
+    pub unavailable: Vec<ProbeContextRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProbeContextRef {
+    pub kind: String,
+    pub version: u64,
+}
+
 /// The proxies of the running config that log in as a device of an account, from `GET /logins`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Logins {

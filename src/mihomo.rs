@@ -27,8 +27,8 @@ use crate::{
     PROVIDER_UPDATE_TIMEOUT, Result,
     models::{
         BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, LoginFailure,
-        LoginOutcome, Logins, MihomoVersion, OutdatedConnections, Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider,
-        ProxyProviders, ProxyUsage, RuleProviders, Rules, WsConnectionId,
+        LoginOutcome, Logins, MihomoVersion, OutdatedConnections, ProbeContexts, ProbeEvents, Protocol, Proxies, Proxy,
+        ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage, RuleProviders, Rules, WsConnectionId,
     },
     ret_failed_resp,
     stream::WsStream,
@@ -680,6 +680,54 @@ impl Mihomo {
             ret_failed_resp!("{}", err_msg);
         }
         Ok(response.json::<ProxyUsage>().await?)
+    }
+
+    /// 获取探测的决策记录中序号大于 `after` 的事件，最多 `limit` 条。内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_probe_events(&self, after: u64, limit: u32) -> Result<Option<ProbeEvents>> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/probes/events")?
+            .query(&[("after", after.to_string()), ("limit", limit.to_string())])
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response
+                .json::<ErrorResponse>()
+                .await
+                .map_or_else(|e| format!("get probe events failed, {}", e), |err_res| err_res.message);
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<ProbeEvents>().await?))
+    }
+
+    /// 获取决策记录引用的上下文：本实例的参数，以及指定版本的配置与排除表上下文。
+    /// 内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_probe_contexts(&self, configs: &[u64], exclusions: &[u64]) -> Result<Option<ProbeContexts>> {
+        let query: Vec<(&str, String)> = configs
+            .iter()
+            .map(|version| ("config", version.to_string()))
+            .chain(exclusions.iter().map(|version| ("exclusions", version.to_string())))
+            .collect();
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/probes/contexts")?
+            .query(&query)
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response.json::<ErrorResponse>().await.map_or_else(
+                |e| format!("get probe contexts failed, {}", e),
+                |err_res| err_res.message,
+            );
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<ProbeContexts>().await?))
     }
 
     /// 获取当前配置中需要登录的节点，不会启动节点；`state_dirs` 为其它配置的节点写的 state-dir，
