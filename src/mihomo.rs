@@ -730,6 +730,27 @@ impl Mihomo {
         Ok(Some(response.json::<ProbeContexts>().await?))
     }
 
+    /// 获取面向界面的策略视图。视图由内核生成、界面按通用元素渲染，这里原样透传、不定义模型，
+    /// 视图的变化不需要改插件。内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_probe_view(&self) -> Result<Option<serde_json::Value>> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/probes/view")?
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response
+                .json::<ErrorResponse>()
+                .await
+                .map_or_else(|e| format!("get probe view failed, {}", e), |err_res| err_res.message);
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<serde_json::Value>().await?))
+    }
+
     /// 获取当前配置中需要登录的节点，不会启动节点；`state_dirs` 为其它配置的节点写的 state-dir，
     /// 内核按自己的工作目录解析，返回与之共用设备身份的节点。内核没有该接口（旧内核）时返回 `None`
     pub async fn get_logins(&self, state_dirs: &[String]) -> Result<Option<Logins>> {
