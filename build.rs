@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "flush_fakeip",
     "flush_dns",
     "get_connections",
+    "get_closed_connections",
     "close_all_connections",
     "close_connection",
     "get_groups",

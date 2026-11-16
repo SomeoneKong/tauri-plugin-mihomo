@@ -1,4 +1,4 @@
-import { BaseConfig, Connections, CoreUpdaterChannel, Groups, LogLevel, MihomoVersion, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, RuleProviders, Rules } from "./bindings";
+import { BaseConfig, ClosedConnections, Connections, CoreUpdaterChannel, Groups, LogLevel, MihomoVersion, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, RuleProviders, Rules } from "./bindings";
 export * from "./bindings";
 export type MihomoGroupDelay = Record<string, number>;
 /**
@@ -28,6 +28,11 @@ export declare function flushDNS(): Promise<void>;
  * @returns 所有连接信息
  */
 export declare function getConnections(): Promise<Connections>;
+/**
+ * 获取最近关闭的连接中序号大于 `after` 的记录，最多 `limit` 条
+ * @returns 内核没有该接口（旧内核）时为 null
+ */
+export declare function getClosedConnections(after: number, limit: number): Promise<ClosedConnections | null>;
 /**
  * 关闭所有连接
  */

@@ -26,9 +26,10 @@ use crate::{
     DEFAULT_REQUEST_TIMEOUT, DOWNLOAD_FILE_TIMEOUT, Error, LOGIN_TIMEOUT, LOGOUT_TIMEOUT, OUTDATED_CONNECTIONS_TIMEOUT,
     PROVIDER_UPDATE_TIMEOUT, Result,
     models::{
-        BaseConfig, ConnectionManager, Connections, CoreUpdaterChannel, ErrorResponse, Groups, LogLevel, LoginFailure,
-        LoginOutcome, Logins, MihomoVersion, OutdatedConnections, ProbeContexts, ProbeEvents, Protocol, Proxies, Proxy,
-        ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage, RuleProviders, Rules, WsConnectionId,
+        BaseConfig, ClosedConnections, ConnectionManager, ConnectionUsage, Connections, CoreUpdaterChannel,
+        ErrorResponse, Groups, LogLevel, LoginFailure, LoginOutcome, Logins, MihomoVersion, OutdatedConnections,
+        ProbeContexts, ProbeEvents, Protocol, Proxies, Proxy, ProxyDelay, ProxyProvider, ProxyProviders, ProxyUsage,
+        RuleProviders, Rules, WsConnectionId,
     },
     ret_failed_resp,
     stream::WsStream,
@@ -680,6 +681,58 @@ impl Mihomo {
             ret_failed_resp!("{}", err_msg);
         }
         Ok(response.json::<ProxyUsage>().await?)
+    }
+
+    /// 获取连接统计，`since`、`until` 为 UTC 小时（自 Unix 纪元起），两端都包含。带 `touched_since`
+    /// （上一次响应的 `tick - 1`）时只返回此后计过数的条目。内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_connection_usage(
+        &self,
+        since: i64,
+        until: i64,
+        touched_since: Option<i64>,
+    ) -> Result<Option<ConnectionUsage>> {
+        let mut query = vec![("since", since.to_string()), ("until", until.to_string())];
+        if let Some(touched_since) = touched_since {
+            query.push(("touchedSince", touched_since.to_string()));
+        }
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/usage/connections")?
+            .query(&query)
+            .send()
+            .await?;
+        if lacks_endpoint(response.status()) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response.json::<ErrorResponse>().await.map_or_else(
+                |e| format!("get connection usage failed, {}", e),
+                |err_res| err_res.message,
+            );
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<ConnectionUsage>().await?))
+    }
+
+    /// 获取最近关闭的连接中序号大于 `after` 的记录，最多 `limit` 条。内核没有该接口（旧内核）时返回 `None`
+    pub async fn get_closed_connections(&self, after: u64, limit: u32) -> Result<Option<ClosedConnections>> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::GET, "/connections/closed")?
+            .query(&[("after", after.to_string()), ("limit", limit.to_string())])
+            .send()
+            .await?;
+        if lacks_endpoint(response.status()) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response.json::<ErrorResponse>().await.map_or_else(
+                |e| format!("get closed connections failed, {}", e),
+                |err_res| err_res.message,
+            );
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<ClosedConnections>().await?))
     }
 
     /// 获取探测的决策记录中序号大于 `after` 的事件，最多 `limit` 条。内核没有该接口（旧内核）时返回 `None`
@@ -1395,6 +1448,12 @@ fn login_path(name: &str) -> String {
         _ => utf8_percent_encode(name, NON_ALPHANUMERIC).to_string(),
     };
     format!("/logins/{segment}")
+}
+
+/// A core without an endpoint answers 404, or 405 where the path matches a route of another
+/// method, as `/connections/{id}` does for `/connections/closed`.
+fn lacks_endpoint(status: StatusCode) -> bool {
+    status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED
 }
 
 #[cfg(test)]

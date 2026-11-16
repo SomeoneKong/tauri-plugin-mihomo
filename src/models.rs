@@ -123,6 +123,9 @@ pub struct BaseConfig {
     pub keep_alive_interval: isize,
     pub keep_alive_idle: isize,
     pub disable_keep_alive: bool,
+    /// Whether the core counts connections per host, process, rule and route; unset on a
+    /// core without the connection stats.
+    pub connection_stats: Option<bool>,
 
     #[serde(flatten, default)]
     pub unknown_fields: HashMap<String, Value>,
@@ -946,6 +949,8 @@ pub struct RuleProvider {
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct Connections {
+    /// The run of the core the snapshot is from; unset on a core that does not tell.
+    pub instance: Option<String>,
     pub download_total: u64,
     pub upload_total: u64,
     pub connections: Option<Vec<Connection>>,
@@ -1179,6 +1184,111 @@ pub struct ProxyUsageBucket {
     pub down: u64,
 }
 
+/// A page of the connections the core closed recently, from `GET /connections/closed`.
+///
+/// Records are in the order of their sequence numbers within one `instance`. Traffic counted
+/// after a close gives the record a new sequence number, so a reader following them reads it
+/// again and replaces what it had by id. Every connection closed after `evicted_until`,
+/// within the time the core keeps them, is kept; it is unset when none was dropped for room.
+/// `truncated` is set when records after the one read last were dropped.
+#[derive(Debug, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+#[ts(export)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClosedConnections {
+    pub instance: String,
+    pub started_at: String,
+    pub oldest: u64,
+    pub latest: u64,
+    pub evicted_until: Option<String>,
+    pub truncated: bool,
+    pub records: Vec<ClosedConnection>,
+}
+
+/// A closed connection as the connections list shows it, with its sequence number and the
+/// time it was closed.
+#[derive(Debug, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedConnection {
+    #[serde(flatten)]
+    pub connection: Connection,
+    pub seq: u64,
+    pub closed_at: String,
+}
+
+/// Connection stats of a range of UTC hours (hours since the Unix epoch), from
+/// `GET /usage/connections`.
+///
+/// Within one `instance`, the counts of an hour only grow; hours from `retained_since` to
+/// `settled` are final. `tick` is the core's clock when the snapshot began: a read with
+/// `touched_since` of `tick - 1` returns every entry counted after this one read it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionUsage {
+    pub instance: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub counting: ConnectionCounting,
+    pub tick: i64,
+    pub started_at: String,
+    pub hour: i64,
+    pub settled: i64,
+    pub retained_since: i64,
+    #[serde(default)]
+    pub overflow: bool,
+    #[serde(default)]
+    pub entries: Vec<ConnectionUsageEntry>,
+}
+
+/// The hours, as inclusive ranges, connections were counted throughout and those they were
+/// counted for a part of; the other hours were not counted.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConnectionCounting {
+    #[serde(default)]
+    pub on: Vec<(i64, i64)>,
+    #[serde(default)]
+    pub partial: Vec<(i64, i64)>,
+}
+
+/// What the core counted for one key: where the connections came from, the process, the
+/// target, the network, the rule and the route.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConnectionUsageKey {
+    pub in_type: String,
+    pub in_name: String,
+    pub in_user: String,
+    #[serde(rename = "srcIP")]
+    pub src_ip: String,
+    pub process: String,
+    pub target: String,
+    #[serde(rename = "targetIsIP")]
+    pub target_is_ip: bool,
+    pub network: String,
+    pub rule: String,
+    pub rule_payload: String,
+    pub provider: String,
+    pub chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConnectionUsageEntry {
+    #[serde(flatten)]
+    pub key: ConnectionUsageKey,
+    #[serde(default)]
+    pub buckets: Vec<ConnectionUsageBucket>,
+}
+
+/// The traffic of one key in one hour, and the connections opened in it.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConnectionUsageBucket {
+    pub hour: i64,
+    pub up: u64,
+    pub down: u64,
+    #[serde(default)]
+    pub conns: u64,
+}
+
 /// Decision records of the probe strategy, from `GET /probes/events`.
 ///
 /// Sequence numbers count from 1 within one `instance`; events before `oldest` were dropped
@@ -1323,4 +1433,79 @@ pub struct OutdatedConnections {
     pub kept: u64,
     /// Connections kept as they were not judged in time, or as a provider updated meanwhile.
     pub undetermined: u64,
+}
+
+#[cfg(test)]
+mod connection_stats_tests {
+    use super::*;
+
+    #[test]
+    fn closed_connections_keep_the_connection_fields() {
+        let body = r#"{
+            "instance": "i-1", "startedAt": "2026-11-16T10:00:00Z", "oldest": 3, "latest": 9,
+            "evictedUntil": null, "truncated": true,
+            "records": [{
+                "id": "c-1", "metadata": {"network": "tcp", "type": "Tun", "host": "a.example.com"},
+                "upload": 10, "download": 20, "start": "2026-11-16T10:01:00Z",
+                "chains": ["JP 01", "Proxy"], "providerChains": ["sub", ""], "rule": "Match", "rulePayload": "",
+                "dialerChains": [["relay"]], "seq": 9, "closedAt": "2026-11-16T10:02:00Z"
+            }]
+        }"#;
+        let closed: ClosedConnections = serde_json::from_str(body).unwrap();
+        assert_eq!(closed.instance, "i-1");
+        assert!(closed.truncated);
+        assert_eq!(closed.evicted_until, None);
+        let record = &closed.records[0];
+        assert_eq!((record.seq, record.closed_at.as_str()), (9, "2026-11-16T10:02:00Z"));
+        assert_eq!(record.connection.id, "c-1");
+        assert_eq!(record.connection.download, 20);
+        assert!(record.connection.extra.contains_key("dialerChains"));
+        assert!(!record.connection.extra.contains_key("seq"));
+
+        let encoded = serde_json::to_value(&closed).unwrap();
+        assert_eq!(encoded["records"][0]["seq"], 9);
+        assert_eq!(encoded["records"][0]["id"], "c-1");
+        assert_eq!(encoded["records"][0]["closedAt"], "2026-11-16T10:02:00Z");
+    }
+
+    #[test]
+    fn connection_usage_reads_keys_buckets_and_counting() {
+        let body = r#"{
+            "instance": "i-1", "enabled": true,
+            "counting": {"on": [[10, 12]], "partial": [[13, 13]]},
+            "tick": 42, "startedAt": "2026-11-16T10:00:00Z", "hour": 13, "settled": 12, "retainedSince": 10,
+            "overflow": false,
+            "entries": [{
+                "inType": "Tun", "inName": "", "inUser": "", "srcIP": "198.18.0.1", "process": "chrome.exe",
+                "target": "203.0.113.9", "targetIsIP": true, "network": "tcp", "rule": "Match", "rulePayload": "",
+                "provider": "sub", "chain": ["JP 01", "Proxy"],
+                "buckets": [{"hour": 12, "up": 1, "down": 2, "conns": 3}]
+            }]
+        }"#;
+        let usage: ConnectionUsage = serde_json::from_str(body).unwrap();
+        assert_eq!(usage.counting.on, vec![(10, 12)]);
+        assert_eq!(usage.counting.partial, vec![(13, 13)]);
+        assert_eq!(usage.tick, 42);
+        let entry = &usage.entries[0];
+        assert_eq!(entry.key.src_ip, "198.18.0.1");
+        assert!(entry.key.target_is_ip);
+        assert_eq!(entry.key.chain, vec!["JP 01", "Proxy"]);
+        assert_eq!(
+            entry.buckets[0],
+            ConnectionUsageBucket {
+                hour: 12,
+                up: 1,
+                down: 2,
+                conns: 3
+            }
+        );
+    }
+
+    #[test]
+    fn base_config_reads_the_connection_stats_switch() {
+        let config: BaseConfig = serde_json::from_str(r#"{"connection-stats": true}"#).unwrap();
+        assert_eq!(config.connection_stats, Some(true));
+        let config: BaseConfig = serde_json::from_str(r#"{"mixed-port": 7890}"#).unwrap();
+        assert_eq!(config.connection_stats, None);
+    }
 }

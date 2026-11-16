@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   BaseConfig,
+  ClosedConnections,
   Connections,
   CoreUpdaterChannel,
   Groups,
@@ -66,6 +67,14 @@ export async function flushDNS(): Promise<void> {
  */
 export async function getConnections(): Promise<Connections> {
   return await invoke<Connections>("plugin:mihomo|get_connections");
+}
+
+/**
+ * 获取最近关闭的连接中序号大于 `after` 的记录，最多 `limit` 条
+ * @returns 内核没有该接口（旧内核）时为 null
+ */
+export async function getClosedConnections(after: number, limit: number): Promise<ClosedConnections | null> {
+  return await invoke<ClosedConnections | null>("plugin:mihomo|get_closed_connections", { after, limit });
 }
 
 /**

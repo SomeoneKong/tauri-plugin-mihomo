@@ -44,6 +44,13 @@ async function getConnections() {
     return await invoke("plugin:mihomo|get_connections");
 }
 /**
+ * 获取最近关闭的连接中序号大于 `after` 的记录，最多 `limit` 条
+ * @returns 内核没有该接口（旧内核）时为 null
+ */
+async function getClosedConnections(after, limit) {
+    return await invoke("plugin:mihomo|get_closed_connections", { after, limit });
+}
+/**
  * 关闭所有连接
  */
 async function closeAllConnections() {
@@ -476,4 +483,4 @@ class MihomoWebSocket {
 }
 MihomoWebSocket.instances = new Set();
 
-export { MihomoWebSocket, clearAllWsConnections, closeAllConnections, closeConnection, delayGroup, delayProxyByName, flushDNS, flushFakeIp, getBaseConfig, getConnections, getGroupByName, getGroups, getProxies, getProxyByName, getProxyProviderByName, getProxyProviders, getRuleProviders, getRules, getVersion, healthcheckNodeInProvider, healthcheckProxyProvider, patchBaseConfig, reloadConfig, restart, selectNodeForGroup, unfixedProxy, updateController, updateGeo, updateProxyProvider, updateRuleProvider, updateSecret, upgradeCore, upgradeGeo, upgradeUi };
+export { MihomoWebSocket, clearAllWsConnections, closeAllConnections, closeConnection, delayGroup, delayProxyByName, flushDNS, flushFakeIp, getBaseConfig, getClosedConnections, getConnections, getGroupByName, getGroups, getProxies, getProxyByName, getProxyProviderByName, getProxyProviders, getRuleProviders, getRules, getVersion, healthcheckNodeInProvider, healthcheckProxyProvider, patchBaseConfig, reloadConfig, restart, selectNodeForGroup, unfixedProxy, updateController, updateGeo, updateProxyProvider, updateRuleProvider, updateSecret, upgradeCore, upgradeGeo, upgradeUi };

@@ -7,6 +7,7 @@ permissions = [
   "allow-flush-fakeip",
   "allow-flush-dns",
   "allow-get-connections",
+  "allow-get-closed-connections",
   "allow-close-all-connections",
   "allow-close-connection",
   "allow-get-groups",

@@ -46,6 +46,13 @@ async function getConnections() {
     return await core.invoke("plugin:mihomo|get_connections");
 }
 /**
+ * 获取最近关闭的连接中序号大于 `after` 的记录，最多 `limit` 条
+ * @returns 内核没有该接口（旧内核）时为 null
+ */
+async function getClosedConnections(after, limit) {
+    return await core.invoke("plugin:mihomo|get_closed_connections", { after, limit });
+}
+/**
  * 关闭所有连接
  */
 async function closeAllConnections() {
@@ -487,6 +494,7 @@ exports.delayProxyByName = delayProxyByName;
 exports.flushDNS = flushDNS;
 exports.flushFakeIp = flushFakeIp;
 exports.getBaseConfig = getBaseConfig;
+exports.getClosedConnections = getClosedConnections;
 exports.getConnections = getConnections;
 exports.getGroupByName = getGroupByName;
 exports.getGroups = getGroups;

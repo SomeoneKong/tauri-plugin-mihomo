@@ -47,6 +47,15 @@ pub(crate) async fn get_connections(state: State<'_, Mihomo>) -> Result<Connecti
 }
 
 #[command]
+pub(crate) async fn get_closed_connections(
+    state: State<'_, Mihomo>,
+    after: u64,
+    limit: u32,
+) -> Result<Option<ClosedConnections>> {
+    state.get_closed_connections(after, limit).await
+}
+
+#[command]
 pub(crate) async fn close_all_connections(state: State<'_, Mihomo>) -> Result<()> {
     state.close_all_connections().await
 }

@@ -117,6 +117,7 @@ impl Builder {
                 commands::flush_dns,
                 // connections
                 commands::get_connections,
+                commands::get_closed_connections,
                 commands::close_all_connections,
                 commands::close_connection,
                 // groups

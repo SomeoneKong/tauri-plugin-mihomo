@@ -43,6 +43,11 @@ export type BaseConfig = {
     keepAliveInterval: number;
     keepAliveIdle: number;
     disableKeepAlive: boolean;
+    /**
+     * Whether the core counts connections per host, process, rule and route; unset on a
+     * core without the connection stats.
+     */
+    connectionStats: boolean | null;
 } & ({
     [key in string]: number | string | boolean | Array<JsonValue> | {
         [key in string]: JsonValue;
