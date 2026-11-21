@@ -804,6 +804,30 @@ impl Mihomo {
         Ok(Some(response.json::<serde_json::Value>().await?))
     }
 
+    /// 清除探测策略的记忆（失效与劣化计次、让位与试用、可靠性偏好等），内核等各组处理完才返回。
+    /// 结果原样透传。内核没有该接口（旧内核）时返回 `None`
+    pub async fn clear_probe_memory(&self) -> Result<Option<serde_json::Value>> {
+        let response = self
+            .load_ctx()
+            .build_request(Method::DELETE, "/probes/memory")?
+            .send()
+            .await?;
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let err_msg = response.json::<ErrorResponse>().await.map_or_else(
+                |e| format!("clear probe memory failed, {}", e),
+                |err_res| err_res.message,
+            );
+            ret_failed_resp!("{}", err_msg);
+        }
+        Ok(Some(response.json::<serde_json::Value>().await?))
+    }
+
     /// 获取当前配置中需要登录的节点，不会启动节点；`state_dirs` 为其它配置的节点写的 state-dir，
     /// 内核按自己的工作目录解析，返回与之共用设备身份的节点。内核没有该接口（旧内核）时返回 `None`
     pub async fn get_logins(&self, state_dirs: &[String]) -> Result<Option<Logins>> {
